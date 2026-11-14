@@ -1,27 +1,32 @@
 name: Build iOS Dylib
+
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
+
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
     - name: Compile Dylib with Apple Clang
       run: |
         SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
         echo "Using iPhoneOS SDK: $SDK_PATH"
         
-        clang -shared -isysroot "$SDK_PATH" \
-          -arch arm64 -arch arm64e \
+        xcrun --sdk iphoneos clang -dynamiclib -isysroot "$SDK_PATH" \
+          -arch arm64 \
           -miphoneos-version-min=14.0 \
           -fobjc-arc \
           -framework UIKit -framework Foundation \
           -o AutoBattle.dylib Tweak.m
           
         ls -la AutoBattle.dylib
+
     - name: Upload Dylib Artifact
       uses: actions/upload-artifact@v4
       with:
