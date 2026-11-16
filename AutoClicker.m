@@ -43,12 +43,26 @@ static UITouch *ACCreateTouch(CGPoint point, UIWindow *window) {
 
     UIView *hitView = [window hitTest:point withEvent:nil] ?: window;
     [touch setView:hitView];
-    [touch setGestureView:hitView];
     [touch setTapCount:1];
-    [touch setIsTap:NO];
-    [touch _setIsFirstTouchForView:YES];
-    if ([touch respondsToSelector:@selector(_setIsTapToClick:)]) {
-        [touch _setIsTapToClick:NO];
+
+    // KIF uses different internal touch flags before and after iOS 14.
+    // iOS 15–16 follows the newer path; older flags can throw an
+    // unrecognized-selector exception and abort the host game.
+    if (@available(iOS 14.0, *)) {
+        if ([touch respondsToSelector:@selector(_setIsTapToClick:)]) {
+            [touch _setIsTapToClick:NO];
+        }
+    } else {
+        if ([touch respondsToSelector:@selector(_setIsFirstTouchForView:)]) {
+            [touch _setIsFirstTouchForView:YES];
+        }
+        if ([touch respondsToSelector:@selector(setIsTap:)]) {
+            [touch setIsTap:NO];
+        }
+    }
+
+    if ([touch respondsToSelector:@selector(setGestureView:)]) {
+        [touch setGestureView:hitView];
     }
     [touch setTimestamp:NSProcessInfo.processInfo.systemUptime];
     [touch setPhase:UITouchPhaseBegan];
