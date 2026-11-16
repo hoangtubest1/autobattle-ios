@@ -7,128 +7,97 @@
 
 // ─── Touch Simulation (safe, no crash) ───────────────────────────────────────
 
-static void sendFakeTouch(CGPoint point) {
-    @try {
-        UIApplication *app = [UIApplication sharedApplication];
+// UIKit's UITouch initializer and phase/location setters are private APIs.
+// Build one touch lifecycle with those setters instead of creating a bare UITouch
+// and mutating it through KVC (which can leave UIKit's internal state invalid).
+@interface UITouch (ACPrivateTouch)
+- (void)setWindow:(UIWindow *)window;
+- (void)setView:(UIView *)view;
+- (void)setTapCount:(NSUInteger)tapCount;
+- (void)setIsTap:(BOOL)isTap;
+- (void)setTimestamp:(NSTimeInterval)timestamp;
+- (void)setPhase:(UITouchPhase)phase;
+- (void)setGestureView:(UIView *)view;
+- (void)_setLocationInWindow:(CGPoint)location resetPrevious:(BOOL)resetPrevious;
+- (void)_setIsFirstTouchForView:(BOOL)firstTouchForView;
+- (void)_setIsTapToClick:(BOOL)isTapToClick;
+@end
 
-        // Tìm game window (không phải PassthroughWindow)
-        UIWindow *gameWin = nil;
-        for (UIWindow *w in app.windows) {
-            if (!w.isHidden && [NSStringFromClass([w class]) isEqualToString:@"UIWindow"]) {
-                gameWin = w; break;
-            }
-        }
-        if (!gameWin) {
-            for (UIWindow *w in app.windows) {
-                if (w.isKeyWindow) { gameWin = w; break; }
-            }
-        }
-        if (!gameWin) return;
+@interface UIEvent (ACPrivateTouches)
+- (void)_addTouch:(UITouch *)touch forDelayedDelivery:(BOOL)delayed;
+- (void)_clearTouches;
+@end
 
-        // Hit test để lấy đúng view
-        UIView *hitView = [gameWin hitTest:point withEvent:nil] ?: gameWin;
+@interface UIApplication (ACPrivateTouchEvent)
+- (UIEvent *)_touchesEvent;
+@end
 
-        // Tạo UITouch mới mỗi lần (không reuse tránh crash)
-        UITouch *touch = [UITouch new];
-        [touch setValue:@(UITouchPhaseBegan)      forKey:@"phase"];
-        [touch setValue:@(1)                       forKey:@"tapCount"];
-        [touch setValue:@(CACurrentMediaTime())    forKey:@"timestamp"];
-        [touch setValue:hitView                    forKey:@"view"];
-        [touch setValue:gameWin                    forKey:@"window"];
-        [touch setValue:[NSValue valueWithCGPoint:point] forKey:@"locationInWindow"];
-        [touch setValue:[NSValue valueWithCGPoint:point] forKey:@"previousLocationInWindow"];
-        [touch setValue:@(UITouchTypeDirect)       forKey:@"type"];
+static UITouch *ACCreateTouch(CGPoint point, UIWindow *window) {
+    UITouch *touch = [UITouch alloc];
+    if (!touch || !window) return nil;
 
-        NSSet *touches = [NSSet setWithObject:touch];
+    // setWindow: resets UIKit's internal touch fields, so it must be first.
+    [touch setWindow:window];
+    [touch _setLocationInWindow:point resetPrevious:YES];
 
-        // --- Phương pháp 1: UITouchesEvent (Unity-compatible) ---
-        BOOL method1OK = NO;
-        SEL eventSel = NSSelectorFromString(@"_touchesEvent");
-        if ([app respondsToSelector:eventSel]) {
-            @try {
-                NSMethodSignature *sig = [app methodSignatureForSelector:eventSel];
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:app]; [inv setSelector:eventSel]; [inv invoke];
-
-                UIEvent *event = nil;
-                [inv getReturnValue:&event];
-
-                if (event) {
-                    SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
-                    if ([event respondsToSelector:addSel]) {
-                        NSMethodSignature *addSig = [event methodSignatureForSelector:addSel];
-                        NSInvocation *addInv = [NSInvocation invocationWithMethodSignature:addSig];
-                        [addInv setTarget:event]; [addInv setSelector:addSel];
-                        [addInv setArgument:&touch atIndex:2];
-                        BOOL delayed = NO; [addInv setArgument:&delayed atIndex:3];
-                        [addInv invoke];
-                    }
-                    [app sendEvent:event];
-                    method1OK = YES;
-
-                    // Touch end sau 60ms
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC),
-                                   dispatch_get_main_queue(), ^{
-                        @try {
-                            UITouch *endTouch = [UITouch new];
-                            [endTouch setValue:@(UITouchPhaseEnded)      forKey:@"phase"];
-                            [endTouch setValue:@(1)                       forKey:@"tapCount"];
-                            [endTouch setValue:@(CACurrentMediaTime())    forKey:@"timestamp"];
-                            [endTouch setValue:hitView                    forKey:@"view"];
-                            [endTouch setValue:gameWin                    forKey:@"window"];
-                            [endTouch setValue:[NSValue valueWithCGPoint:point] forKey:@"locationInWindow"];
-                            [endTouch setValue:[NSValue valueWithCGPoint:point] forKey:@"previousLocationInWindow"];
-                            [endTouch setValue:@(UITouchTypeDirect)       forKey:@"type"];
-
-                            SEL addSel2 = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
-                            if ([event respondsToSelector:addSel2]) {
-                                NSMethodSignature *s2 = [event methodSignatureForSelector:addSel2];
-                                NSInvocation *i2 = [NSInvocation invocationWithMethodSignature:s2];
-                                [i2 setTarget:event]; [i2 setSelector:addSel2];
-                                [i2 setArgument:&endTouch atIndex:2];
-                                BOOL d = NO; [i2 setArgument:&d atIndex:3];
-                                [i2 invoke];
-                            }
-                            [app sendEvent:event];
-
-                            // Dọn event (KHÔNG dùng _removeAllTouches → crash)
-                            SEL clearSel = NSSelectorFromString(@"_removeTouches:");
-                            if ([event respondsToSelector:clearSel]) {
-                                [event performSelector:clearSel withObject:touches];
-                            }
-                        } @catch (NSException *e) {
-                            NSLog(@"[AutoClicker] touchEnd exception: %@", e);
-                        }
-                    });
-                }
-            } @catch (NSException *e) {
-                NSLog(@"[AutoClicker] Method1 exception: %@", e);
-                method1OK = NO;
-            }
-        }
-
-        // --- Phương pháp 2: Direct responder chain (fallback) ---
-        if (!method1OK) {
-            @try {
-                [hitView touchesBegan:touches withEvent:nil];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC),
-                               dispatch_get_main_queue(), ^{
-                    @try {
-                        [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
-                        [touch setValue:@(CACurrentMediaTime()) forKey:@"timestamp"];
-                        [hitView touchesEnded:[NSSet setWithObject:touch] withEvent:nil];
-                    } @catch (NSException *e) {
-                        NSLog(@"[AutoClicker] Method2 end exception: %@", e);
-                    }
-                });
-            } @catch (NSException *e) {
-                NSLog(@"[AutoClicker] Method2 exception: %@", e);
-            }
-        }
-
-    } @catch (NSException *ex) {
-        NSLog(@"[AutoClicker] sendFakeTouch exception: %@", ex);
+    UIView *hitView = [window hitTest:point withEvent:nil] ?: window;
+    [touch setView:hitView];
+    [touch setGestureView:hitView];
+    [touch setTapCount:1];
+    [touch setIsTap:NO];
+    [touch _setIsFirstTouchForView:YES];
+    if ([touch respondsToSelector:@selector(_setIsTapToClick:)]) {
+        [touch _setIsTapToClick:NO];
     }
+    [touch setTimestamp:NSProcessInfo.processInfo.systemUptime];
+    [touch setPhase:UITouchPhaseBegan];
+    return touch;
+}
+
+static void ACDispatchTouch(UIApplication *app, UITouch *touch) {
+    if (![app respondsToSelector:@selector(_touchesEvent)] || !touch) return;
+
+    UIEvent *event = [app _touchesEvent];
+    if (!event) return;
+    if ([event respondsToSelector:@selector(_clearTouches)]) {
+        [event _clearTouches];
+    }
+    if (![event respondsToSelector:@selector(_addTouch:forDelayedDelivery:)]) return;
+
+    [event _addTouch:touch forDelayedDelivery:NO];
+    [app sendEvent:event];
+}
+
+static void sendFakeTouch(CGPoint point) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIApplication *app = UIApplication.sharedApplication;
+        UIWindow *gameWin = nil;
+
+        for (UIWindow *window in app.windows) {
+            if (!window.isHidden &&
+                ![NSStringFromClass(window.class) isEqualToString:@"PassthroughWindow"]) {
+                gameWin = window;
+                break;
+            }
+        }
+        if (!gameWin) gameWin = app.keyWindow;
+        if (!gameWin || [NSStringFromClass(gameWin.class) isEqualToString:@"PassthroughWindow"]) {
+            NSLog(@"[AutoClicker] No game window available; tap skipped");
+            return;
+        }
+
+        UITouch *touch = ACCreateTouch(point, gameWin);
+        if (!touch) return;
+        ACDispatchTouch(app, touch);
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            [touch _setLocationInWindow:point resetPrevious:NO];
+            [touch setTimestamp:NSProcessInfo.processInfo.systemUptime];
+            [touch setPhase:UITouchPhaseEnded];
+            ACDispatchTouch(app, touch);
+        });
+    });
 }
 
 // ─── Visual Flash ─────────────────────────────────────────────────────────────
