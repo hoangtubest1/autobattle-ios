@@ -7,128 +7,112 @@
 
 // ─── Touch Simulation (safe, no crash) ───────────────────────────────────────
 
-static void sendFakeTouch(CGPoint point) {
-    @try {
-        UIApplication *app = [UIApplication sharedApplication];
+// UIKit's UITouch initializer and phase/location setters are private APIs.
+// Build one touch lifecycle with those setters instead of creating a bare UITouch
+// and mutating it through KVC (which can leave UIKit's internal state invalid).
+@interface UITouch (ACPrivateTouch)
+- (void)setWindow:(UIWindow *)window;
+- (void)setView:(UIView *)view;
+- (void)setTapCount:(NSUInteger)tapCount;
+- (void)setIsTap:(BOOL)isTap;
+- (void)setTimestamp:(NSTimeInterval)timestamp;
+- (void)setPhase:(UITouchPhase)phase;
+- (void)setGestureView:(UIView *)view;
+- (void)_setLocationInWindow:(CGPoint)location resetPrevious:(BOOL)resetPrevious;
+- (void)_setIsFirstTouchForView:(BOOL)firstTouchForView;
+- (void)_setIsTapToClick:(BOOL)isTapToClick;
+@end
 
-        // Tìm game window (không phải PassthroughWindow)
-        UIWindow *gameWin = nil;
-        for (UIWindow *w in app.windows) {
-            if (!w.isHidden && [NSStringFromClass([w class]) isEqualToString:@"UIWindow"]) {
-                gameWin = w; break;
-            }
+@interface UIEvent (ACPrivateTouches)
+- (void)_addTouch:(UITouch *)touch forDelayedDelivery:(BOOL)delayed;
+- (void)_clearTouches;
+@end
+
+@interface UIApplication (ACPrivateTouchEvent)
+- (UIEvent *)_touchesEvent;
+@end
+
+static UITouch *ACCreateTouch(CGPoint point, UIWindow *window) {
+    if (!window) return nil;
+    UITouch *touch = [[UITouch alloc] init];
+    if (!touch) return nil;
+
+    // setWindow: resets UIKit's internal touch fields, so it must be first.
+    [touch setWindow:window];
+    [touch _setLocationInWindow:point resetPrevious:YES];
+
+    UIView *hitView = [window hitTest:point withEvent:nil] ?: window;
+    [touch setView:hitView];
+    [touch setTapCount:1];
+
+    // KIF uses different internal touch flags before and after iOS 14.
+    // iOS 15–16 follows the newer path; older flags can throw an
+    // unrecognized-selector exception and abort the host game.
+    if (@available(iOS 14.0, *)) {
+        if ([touch respondsToSelector:@selector(_setIsTapToClick:)]) {
+            [touch _setIsTapToClick:NO];
         }
-        if (!gameWin) {
-            for (UIWindow *w in app.windows) {
-                if (w.isKeyWindow) { gameWin = w; break; }
-            }
+    } else {
+        if ([touch respondsToSelector:@selector(_setIsFirstTouchForView:)]) {
+            [touch _setIsFirstTouchForView:YES];
         }
-        if (!gameWin) return;
-
-        // Hit test để lấy đúng view
-        UIView *hitView = [gameWin hitTest:point withEvent:nil] ?: gameWin;
-
-        // Tạo UITouch mới mỗi lần (không reuse tránh crash)
-        UITouch *touch = [UITouch new];
-        [touch setValue:@(UITouchPhaseBegan)      forKey:@"phase"];
-        [touch setValue:@(1)                       forKey:@"tapCount"];
-        [touch setValue:@(CACurrentMediaTime())    forKey:@"timestamp"];
-        [touch setValue:hitView                    forKey:@"view"];
-        [touch setValue:gameWin                    forKey:@"window"];
-        [touch setValue:[NSValue valueWithCGPoint:point] forKey:@"locationInWindow"];
-        [touch setValue:[NSValue valueWithCGPoint:point] forKey:@"previousLocationInWindow"];
-        [touch setValue:@(UITouchTypeDirect)       forKey:@"type"];
-
-        NSSet *touches = [NSSet setWithObject:touch];
-
-        // --- Phương pháp 1: UITouchesEvent (Unity-compatible) ---
-        BOOL method1OK = NO;
-        SEL eventSel = NSSelectorFromString(@"_touchesEvent");
-        if ([app respondsToSelector:eventSel]) {
-            @try {
-                NSMethodSignature *sig = [app methodSignatureForSelector:eventSel];
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:app]; [inv setSelector:eventSel]; [inv invoke];
-
-                UIEvent *event = nil;
-                [inv getReturnValue:&event];
-
-                if (event) {
-                    SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
-                    if ([event respondsToSelector:addSel]) {
-                        NSMethodSignature *addSig = [event methodSignatureForSelector:addSel];
-                        NSInvocation *addInv = [NSInvocation invocationWithMethodSignature:addSig];
-                        [addInv setTarget:event]; [addInv setSelector:addSel];
-                        [addInv setArgument:&touch atIndex:2];
-                        BOOL delayed = NO; [addInv setArgument:&delayed atIndex:3];
-                        [addInv invoke];
-                    }
-                    [app sendEvent:event];
-                    method1OK = YES;
-
-                    // Touch end sau 60ms
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC),
-                                   dispatch_get_main_queue(), ^{
-                        @try {
-                            UITouch *endTouch = [UITouch new];
-                            [endTouch setValue:@(UITouchPhaseEnded)      forKey:@"phase"];
-                            [endTouch setValue:@(1)                       forKey:@"tapCount"];
-                            [endTouch setValue:@(CACurrentMediaTime())    forKey:@"timestamp"];
-                            [endTouch setValue:hitView                    forKey:@"view"];
-                            [endTouch setValue:gameWin                    forKey:@"window"];
-                            [endTouch setValue:[NSValue valueWithCGPoint:point] forKey:@"locationInWindow"];
-                            [endTouch setValue:[NSValue valueWithCGPoint:point] forKey:@"previousLocationInWindow"];
-                            [endTouch setValue:@(UITouchTypeDirect)       forKey:@"type"];
-
-                            SEL addSel2 = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
-                            if ([event respondsToSelector:addSel2]) {
-                                NSMethodSignature *s2 = [event methodSignatureForSelector:addSel2];
-                                NSInvocation *i2 = [NSInvocation invocationWithMethodSignature:s2];
-                                [i2 setTarget:event]; [i2 setSelector:addSel2];
-                                [i2 setArgument:&endTouch atIndex:2];
-                                BOOL d = NO; [i2 setArgument:&d atIndex:3];
-                                [i2 invoke];
-                            }
-                            [app sendEvent:event];
-
-                            // Dọn event (KHÔNG dùng _removeAllTouches → crash)
-                            SEL clearSel = NSSelectorFromString(@"_removeTouches:");
-                            if ([event respondsToSelector:clearSel]) {
-                                [event performSelector:clearSel withObject:touches];
-                            }
-                        } @catch (NSException *e) {
-                            NSLog(@"[AutoClicker] touchEnd exception: %@", e);
-                        }
-                    });
-                }
-            } @catch (NSException *e) {
-                NSLog(@"[AutoClicker] Method1 exception: %@", e);
-                method1OK = NO;
-            }
+        if ([touch respondsToSelector:@selector(setIsTap:)]) {
+            [touch setIsTap:NO];
         }
-
-        // --- Phương pháp 2: Direct responder chain (fallback) ---
-        if (!method1OK) {
-            @try {
-                [hitView touchesBegan:touches withEvent:nil];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC),
-                               dispatch_get_main_queue(), ^{
-                    @try {
-                        [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
-                        [touch setValue:@(CACurrentMediaTime()) forKey:@"timestamp"];
-                        [hitView touchesEnded:[NSSet setWithObject:touch] withEvent:nil];
-                    } @catch (NSException *e) {
-                        NSLog(@"[AutoClicker] Method2 end exception: %@", e);
-                    }
-                });
-            } @catch (NSException *e) {
-                NSLog(@"[AutoClicker] Method2 exception: %@", e);
-            }
-        }
-
-    } @catch (NSException *ex) {
-        NSLog(@"[AutoClicker] sendFakeTouch exception: %@", ex);
     }
+
+    if ([touch respondsToSelector:@selector(setGestureView:)]) {
+        [touch setGestureView:hitView];
+    }
+    [touch setTimestamp:NSProcessInfo.processInfo.systemUptime];
+    [touch setPhase:UITouchPhaseBegan];
+    return touch;
+}
+
+static void ACDispatchTouch(UIApplication *app, UITouch *touch) {
+    if (![app respondsToSelector:@selector(_touchesEvent)] || !touch) return;
+
+    UIEvent *event = [app _touchesEvent];
+    if (!event) return;
+    if ([event respondsToSelector:@selector(_clearTouches)]) {
+        [event _clearTouches];
+    }
+    if (![event respondsToSelector:@selector(_addTouch:forDelayedDelivery:)]) return;
+
+    [event _addTouch:touch forDelayedDelivery:NO];
+    [app sendEvent:event];
+}
+
+static void sendFakeTouch(CGPoint point) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIApplication *app = UIApplication.sharedApplication;
+        UIWindow *gameWin = nil;
+
+        for (UIWindow *window in app.windows) {
+            if (!window.isHidden &&
+                ![NSStringFromClass(window.class) isEqualToString:@"PassthroughWindow"]) {
+                gameWin = window;
+                break;
+            }
+        }
+        if (!gameWin) gameWin = app.keyWindow;
+        if (!gameWin || [NSStringFromClass(gameWin.class) isEqualToString:@"PassthroughWindow"]) {
+            NSLog(@"[AutoClicker] No game window available; tap skipped");
+            return;
+        }
+
+        UITouch *touch = ACCreateTouch(point, gameWin);
+        if (!touch) return;
+        ACDispatchTouch(app, touch);
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            [touch _setLocationInWindow:point resetPrevious:NO];
+            [touch setTimestamp:NSProcessInfo.processInfo.systemUptime];
+            [touch setPhase:UITouchPhaseEnded];
+            ACDispatchTouch(app, touch);
+        });
+    });
 }
 
 // ─── Visual Flash ─────────────────────────────────────────────────────────────
@@ -171,15 +155,21 @@ static void flashAt(CGPoint pt, UIView *parent) {
 // ─── Main Controller ──────────────────────────────────────────────────────────
 
 @interface ACController : NSObject
-@property (nonatomic) BOOL    isRunning;
-@property (nonatomic) CGPoint target;
-@property (nonatomic, strong) NSTimer   *timer;
-@property (nonatomic, strong) UIWindow  *overlay;
-@property (nonatomic, strong) UIButton  *btn;
-@property (nonatomic, strong) UIView    *dot;
-@property (nonatomic, strong) UILabel   *coordLabel;
+@property (nonatomic) BOOL isRunning;
+@property (nonatomic) NSUInteger nextTargetIndex;
+@property (nonatomic, strong) NSMutableArray<NSValue *> *targets;
+@property (nonatomic, strong) NSMutableArray<UIView *> *dots;
+@property (nonatomic, strong) NSTimer *timer;
+@property (nonatomic, strong) UIWindow *overlay;
+@property (nonatomic, strong) UIView *rootView;
+@property (nonatomic, strong) UIButton *btn;
+@property (nonatomic, strong) UILabel *coordLabel;
 + (instancetype)shared;
 - (void)setup;
+- (void)addTarget;
+- (void)removeTarget;
+- (void)moveTarget:(UIPanGestureRecognizer *)g;
+- (void)doClick;
 @end
 
 @implementation ACController
@@ -193,8 +183,9 @@ static void flashAt(CGPoint pt, UIView *parent) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        CGSize s = UIScreen.mainScreen.bounds.size;
-        _target = CGPointMake(s.width * 0.5, s.height * 0.80);
+        _targets = [NSMutableArray array];
+        _dots = [NSMutableArray array];
+        _nextTargetIndex = 0;
     }
     return self;
 }
@@ -219,45 +210,115 @@ static void flashAt(CGPoint pt, UIView *parent) {
     root.backgroundColor = UIColor.clearColor;
     vc.view = root;
     win.rootViewController = vc;
+    self.rootView = root;
 
-    // Nút ▶/⏹
+    // Nút chạy/dừng.
     UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
     b.frame = CGRectMake(10, 140, 54, 54);
     [self applyStyle:b on:NO];
     [b addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
-    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-        initWithTarget:self action:@selector(longPress:)];
-    lp.minimumPressDuration = 0.7;
-    [b addGestureRecognizer:lp];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-        initWithTarget:self action:@selector(pan:)];
-    [b addGestureRecognizer:pan];
     self.btn = b;
     [root addSubview:b];
 
-    // Chấm đỏ (điểm click)
-    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0,0,16,16)];
-    dot.center = self.target;
-    dot.backgroundColor = [UIColor colorWithRed:1 green:0.15 blue:0.15 alpha:0.85];
-    dot.layer.cornerRadius = 8;
-    dot.layer.borderColor = UIColor.whiteColor.CGColor;
-    dot.layer.borderWidth = 1.5;
-    dot.userInteractionEnabled = NO;
-    self.dot = dot;
-    [root addSubview:dot];
+    // Thêm/bớt điểm ở cạnh nút chạy.
+    UIButton *plus = [self smallButtonWithTitle:@"+" frame:CGRectMake(72, 149, 40, 36)];
+    [plus addTarget:self action:@selector(addTarget) forControlEvents:UIControlEventTouchUpInside];
+    [root addSubview:plus];
 
-    // Label tọa độ
+    UIButton *minus = [self smallButtonWithTitle:@"−" frame:CGRectMake(118, 149, 40, 36)];
+    [minus addTarget:self action:@selector(removeTarget) forControlEvents:UIControlEventTouchUpInside];
+    [root addSubview:minus];
+
     UILabel *lbl = [UILabel new];
-    lbl.frame = CGRectMake(70, 149, 110, 22);
+    lbl.frame = CGRectMake(10, 202, 132, 22);
     lbl.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     lbl.textColor = UIColor.whiteColor;
     lbl.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
-    lbl.layer.cornerRadius = 4; lbl.clipsToBounds = YES;
+    lbl.layer.cornerRadius = 4;
+    lbl.clipsToBounds = YES;
     lbl.textAlignment = NSTextAlignmentCenter;
-    lbl.text = [NSString stringWithFormat:@"(%.0f, %.0f)", self.target.x, self.target.y];
     lbl.userInteractionEnabled = NO;
     self.coordLabel = lbl;
     [root addSubview:lbl];
+
+    // Tạo điểm chạm đầu tiên.
+    [self addTarget];
+}
+
+- (UIButton *)smallButtonWithTitle:(NSString *)title frame:(CGRect)frame {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+    button.frame = frame;
+    button.layer.cornerRadius = 8;
+    button.layer.borderWidth = 1;
+    button.layer.borderColor = UIColor.whiteColor.CGColor;
+    button.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:1.0 alpha:0.9];
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+    return button;
+}
+
+- (void)addTarget {
+    if (self.targets.count >= 8 || !self.rootView) return;
+
+    NSUInteger index = self.targets.count;
+    CGSize size = self.rootView.bounds.size;
+    CGFloat column = (CGFloat)(index % 3);
+    CGFloat row = (CGFloat)(index / 3);
+    CGPoint point = CGPointMake(size.width * 0.5 + (column - 1.0) * 54.0,
+                                size.height * 0.78 - row * 64.0);
+
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 28, 28)];
+    dot.center = point;
+    dot.backgroundColor = [UIColor colorWithRed:1 green:0.15 blue:0.15 alpha:0.9];
+    dot.layer.cornerRadius = 14;
+    dot.layer.borderColor = UIColor.whiteColor.CGColor;
+    dot.layer.borderWidth = 1.5;
+    dot.userInteractionEnabled = YES;
+    dot.tag = 1000 + index;
+
+    UILabel *number = [[UILabel alloc] initWithFrame:dot.bounds];
+    number.tag = 1;
+    number.text = [NSString stringWithFormat:@"%lu", (unsigned long)index + 1];
+    number.font = [UIFont boldSystemFontOfSize:12];
+    number.textColor = UIColor.whiteColor;
+    number.textAlignment = NSTextAlignmentCenter;
+    number.userInteractionEnabled = NO;
+    [dot addSubview:number];
+
+    UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(moveTarget:)];
+    [dot addGestureRecognizer:drag];
+
+    [self.targets addObject:[NSValue valueWithCGPoint:point]];
+    [self.dots addObject:dot];
+    [self.rootView addSubview:dot];
+    [self updateCoordinateLabelForPoint:point index:index];
+}
+
+- (void)removeTarget {
+    // Keep at least one point so the start button always has a target.
+    if (self.targets.count <= 1) return;
+
+    UIView *dot = self.dots.lastObject;
+    [dot removeFromSuperview];
+    [self.dots removeLastObject];
+    [self.targets removeLastObject];
+    self.nextTargetIndex = self.nextTargetIndex % self.targets.count;
+
+    [self.dots enumerateObjectsUsingBlock:^(UIView *marker, NSUInteger idx, BOOL *stop) {
+        marker.tag = 1000 + idx;
+        UILabel *number = (UILabel *)[marker viewWithTag:1];
+        number.text = [NSString stringWithFormat:@"%lu", (unsigned long)idx + 1];
+    }];
+
+    CGPoint point = self.targets.lastObject.CGPointValue;
+    [self updateCoordinateLabelForPoint:point index:self.targets.count - 1];
+}
+
+- (void)updateCoordinateLabelForPoint:(CGPoint)point index:(NSUInteger)index {
+    self.coordLabel.text = [NSString stringWithFormat:@"%lu: (%.0f, %.0f)",
+                            (unsigned long)index + 1, point.x, point.y];
 }
 
 - (void)applyStyle:(UIButton *)b on:(BOOL)on {
@@ -280,42 +341,43 @@ static void flashAt(CGPoint pt, UIView *parent) {
     self.isRunning = !self.isRunning;
     [self applyStyle:self.btn on:self.isRunning];
     if (self.isRunning) {
-        // Click ngay lần đầu, sau đó mỗi 2.5 giây
+        self.nextTargetIndex = 0;
         [self doClick];
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:2.5
+        self.timer = [NSTimer scheduledTimerWithTimeInterval:0.2
                                                       target:self
                                                     selector:@selector(doClick)
                                                     userInfo:nil
                                                      repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
     } else {
-        [self.timer invalidate]; self.timer = nil;
+        [self.timer invalidate];
+        self.timer = nil;
     }
 }
 
-- (void)longPress:(UILongPressGestureRecognizer *)g {
-    if (g.state != UIGestureRecognizerStateBegan) return;
-    CGPoint c = self.btn.center;
-    self.target = c;
-    self.dot.center = c;
-    self.coordLabel.text = [NSString stringWithFormat:@"(%.0f, %.0f)", c.x, c.y];
-    // Rung phản hồi
-    [UIView animateWithDuration:0.1 animations:^{ self.btn.transform = CGAffineTransformMakeScale(1.35,1.35); }
-                     completion:^(BOOL f){ [UIView animateWithDuration:0.1 animations:^{ self.btn.transform = CGAffineTransformIdentity; }]; }];
-}
+- (void)moveTarget:(UIPanGestureRecognizer *)g {
+    NSUInteger index = g.view.tag - 1000;
+    if (index >= self.targets.count) return;
 
-- (void)pan:(UIPanGestureRecognizer *)g {
-    CGPoint d = [g translationInView:g.view.superview];
-    CGPoint c = g.view.center;
-    c.x += d.x; c.y += d.y;
-    g.view.center = c;
-    [g setTranslation:CGPointZero inView:g.view.superview];
-    self.coordLabel.frame = CGRectMake(c.x + 32, c.y - 11, 110, 22);
+    CGPoint point = [g locationInView:self.rootView];
+    CGSize bounds = self.rootView.bounds.size;
+    CGFloat margin = 14.0;
+    point.x = MIN(MAX(point.x, margin), bounds.width - margin);
+    point.y = MIN(MAX(point.y, margin), bounds.height - margin);
+
+    self.targets[index] = [NSValue valueWithCGPoint:point];
+    g.view.center = point;
+    [self updateCoordinateLabelForPoint:point index:index];
 }
 
 - (void)doClick {
-    flashAt(self.target, self.overlay.rootViewController.view);
-    sendFakeTouch(self.target);
+    if (self.targets.count == 0) return;
+
+    NSUInteger index = self.nextTargetIndex % self.targets.count;
+    CGPoint point = self.targets[index].CGPointValue;
+    flashAt(point, self.rootView);
+    sendFakeTouch(point);
+    self.nextTargetIndex = (index + 1) % self.targets.count;
 }
 
 @end

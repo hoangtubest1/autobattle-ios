@@ -2,6 +2,8 @@ name: Build iOS AutoClicker Dylib
 
 on:
   push:
+    branches: [ "main", "master", "codex/**" ]
+  pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
