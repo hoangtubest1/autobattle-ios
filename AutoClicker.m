@@ -267,9 +267,9 @@ static void flashAt(CGPoint pt, UIView *parent) {
     self.isRunning = !self.isRunning;
     [self applyStyle:self.btn on:self.isRunning];
     if (self.isRunning) {
-        // Click ngay lần đầu, sau đó mỗi 0.5 giây
+        // Click ngay lần đầu, sau đó mỗi 0.2 giây
         [self doClick];
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5
+        self.timer = [NSTimer scheduledTimerWithTimeInterval:0.2
                                                       target:self
                                                     selector:@selector(doClick)
                                                     userInfo:nil
