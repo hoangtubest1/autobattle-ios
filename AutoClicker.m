@@ -33,8 +33,9 @@
 @end
 
 static UITouch *ACCreateTouch(CGPoint point, UIWindow *window) {
-    UITouch *touch = [UITouch alloc];
-    if (!touch || !window) return nil;
+    if (!window) return nil;
+    UITouch *touch = [[UITouch alloc] init];
+    if (!touch) return nil;
 
     // setWindow: resets UIKit's internal touch fields, so it must be first.
     [touch setWindow:window];
