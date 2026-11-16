@@ -235,20 +235,23 @@ static void flashAt(CGPoint pt, UIView *parent) {
     self.btn = b;
     [root addSubview:b];
 
-    // Chấm đỏ (điểm click)
-    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0,0,16,16)];
+    // Kéo chấm đỏ để chọn vị trí tự chạm.
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0,0,24,24)];
     dot.center = self.target;
     dot.backgroundColor = [UIColor colorWithRed:1 green:0.15 blue:0.15 alpha:0.85];
-    dot.layer.cornerRadius = 8;
+    dot.layer.cornerRadius = 12;
     dot.layer.borderColor = UIColor.whiteColor.CGColor;
     dot.layer.borderWidth = 1.5;
-    dot.userInteractionEnabled = NO;
+    dot.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *dotPan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(moveTarget:)];
+    [dot addGestureRecognizer:dotPan];
     self.dot = dot;
     [root addSubview:dot];
 
-    // Label tọa độ
+    // Tọa độ đang chọn
     UILabel *lbl = [UILabel new];
-    lbl.frame = CGRectMake(70, 149, 110, 22);
+    lbl.frame = CGRectMake(self.target.x + 14, self.target.y - 11, 110, 22);
     lbl.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     lbl.textColor = UIColor.whiteColor;
     lbl.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
@@ -280,9 +283,9 @@ static void flashAt(CGPoint pt, UIView *parent) {
     self.isRunning = !self.isRunning;
     [self applyStyle:self.btn on:self.isRunning];
     if (self.isRunning) {
-        // Click ngay lần đầu, sau đó mỗi 2.5 giây
+        // Click ngay lần đầu, sau đó mỗi 0.5 giây
         [self doClick];
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:2.5
+        self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                                       target:self
                                                     selector:@selector(doClick)
                                                     userInfo:nil
@@ -293,15 +296,16 @@ static void flashAt(CGPoint pt, UIView *parent) {
     }
 }
 
-- (void)longPress:(UILongPressGestureRecognizer *)g {
-    if (g.state != UIGestureRecognizerStateBegan) return;
-    CGPoint c = self.btn.center;
-    self.target = c;
-    self.dot.center = c;
-    self.coordLabel.text = [NSString stringWithFormat:@"(%.0f, %.0f)", c.x, c.y];
-    // Rung phản hồi
-    [UIView animateWithDuration:0.1 animations:^{ self.btn.transform = CGAffineTransformMakeScale(1.35,1.35); }
-                     completion:^(BOOL f){ [UIView animateWithDuration:0.1 animations:^{ self.btn.transform = CGAffineTransformIdentity; }]; }];
+- (void)moveTarget:(UIPanGestureRecognizer *)g {
+    CGPoint p = [g locationInView:self.overlay.rootViewController.view];
+    CGSize bounds = self.overlay.rootViewController.view.bounds.size;
+    CGFloat margin = 12.0;
+    p.x = MIN(MAX(p.x, margin), bounds.width - margin);
+    p.y = MIN(MAX(p.y, margin), bounds.height - margin);
+    self.target = p;
+    self.dot.center = p;
+    self.coordLabel.frame = CGRectMake(p.x + 16, p.y - 11, 110, 22);
+    self.coordLabel.text = [NSString stringWithFormat:@"(%.0f, %.0f)", p.x, p.y];
 }
 
 - (void)pan:(UIPanGestureRecognizer *)g {
