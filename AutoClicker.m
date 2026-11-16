@@ -140,6 +140,29 @@ static void sendHIDTap(CGPoint point) {
     });
 }
 
+// ─── Passthrough Window & View ───────────────────────────────────────────────
+// Cho phép touch xuyên qua vùng trống, chỉ giữ lại touch trên button/dot
+
+@interface PassthroughView : UIView
+@end
+@implementation PassthroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    // Nếu hit vào chính view nền → trả nil để touch xuyên xuống game
+    return (hit == self) ? nil : hit;
+}
+@end
+
+@interface PassthroughWindow : UIWindow
+@end
+@implementation PassthroughWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    // Nếu không có subview nào bắt touch → cho game xử lý
+    return (hit == self) ? nil : hit;
+}
+@end
+
 // ─── Floating UI Controller ──────────────────────────────────────────────────
 
 @interface ACController : NSObject
@@ -175,7 +198,7 @@ static void sendHIDTap(CGPoint point) {
 
 - (void)setup {
     // ── Create overlay window ──
-    UIWindow *win;
+    PassthroughWindow *win;
     UIWindowScene *activeScene = nil;
     for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
         if ([s isKindOfClass:[UIWindowScene class]] &&
@@ -185,19 +208,22 @@ static void sendHIDTap(CGPoint point) {
         }
     }
     if (activeScene)
-        win = [[UIWindow alloc] initWithWindowScene:activeScene];
+        win = [[PassthroughWindow alloc] initWithWindowScene:activeScene];
     else
-        win = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        win = [[PassthroughWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
 
-    win.windowLevel          = UIWindowLevelAlert + 500;
-    win.backgroundColor      = UIColor.clearColor;
+    win.windowLevel            = UIWindowLevelAlert + 500;
+    win.backgroundColor        = UIColor.clearColor;
     win.userInteractionEnabled = YES;
-    // Do NOT call makeKeyAndVisible — game window stays key (gets HID events)
+    // KHÔNG makeKeyAndVisible → game window giữ key → nhận HID events
     win.hidden = NO;
     self.overlayWindow = win;
 
     UIViewController *vc = [UIViewController new];
-    vc.view.backgroundColor = UIColor.clearColor;
+    // Dùng PassthroughView để touch vùng trống xuyên qua game
+    PassthroughView *rootView = [[PassthroughView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    rootView.backgroundColor = UIColor.clearColor;
+    vc.view = rootView;
     win.rootViewController = vc;
 
     // ── Control button ──
