@@ -1,4 +1,4 @@
-name: Build iOS Dylib
+name: Build Standalone AutoClicker Dylib
 
 on:
   push:
@@ -10,25 +10,53 @@ jobs:
     runs-on: macos-latest
 
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Compile Dylib with Apple Clang
+    - name: Install Theos
       run: |
-        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-        echo "Using iPhoneOS SDK: $SDK_PATH"
-        
-        xcrun --sdk iphoneos clang -dynamiclib -isysroot "$SDK_PATH" \
-          -arch arm64 \
-          -miphoneos-version-min=14.0 \
-          -fobjc-arc \
-          -framework UIKit -framework Foundation -framework CoreGraphics \
-          -o AutoBattle.dylib Tweak.m
-          
-        ls -la AutoBattle.dylib
+        git clone --recursive https://github.com/theos/theos.git ~/theos
+        echo "THEOS=~/theos" >> $GITHUB_ENV
 
-    - name: Upload Dylib Artifact
+    - name: Download iOS SDKs
+      run: |
+        git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
+
+    - name: Clone SimpleAutoClicker
+      run: |
+        git clone --recursive https://github.com/DYY-Studio/iOS-SimpleAutoClicker.git clicker
+
+    - name: Patch Constructor (Remove Substrate requirement for Jailed)
+      run: |
+        cd clicker
+        python3 -c "
+        with open('Tweak.x', 'r') as f:
+            code = f.read()
+
+        idx = code.find('__attribute__((constructor))')
+        if idx != -1:
+            new_ctor = '__attribute__((constructor))\nstatic void tweakConstructor() {\n    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\n        [[AutoClickerManager sharedInstance] setupUI];\n    });\n}\n'
+            code = code[:idx] + new_ctor
+
+        with open('Tweak.x', 'w') as f:
+            f.write(code)
+        print('Patched Tweak.x successfully!')
+        "
+
+    - name: Compile Dylib
+      run: |
+        cd clicker
+        export THEOS=~/theos
+        make FINALPACKAGE=1
+
+    - name: Collect Dylib
+      run: |
+        mkdir -p output
+        find clicker/.theos -name "*.dylib" -exec cp {} output/AutoClicker.dylib \;
+        ls -la output/AutoClicker.dylib
+
+    - name: Upload AutoClicker Dylib
       uses: actions/upload-artifact@v4
       with:
-        name: AutoBattle-Dylib
-        path: AutoBattle.dylib
+        name: Standalone-AutoClicker
+        path: output/AutoClicker.dylib
