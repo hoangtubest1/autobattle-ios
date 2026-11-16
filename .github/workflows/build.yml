@@ -1,4 +1,4 @@
-name: Build Standalone AutoClicker Dylib
+name: Build iOS AutoClicker Dylib
 
 on:
   push:
@@ -13,50 +13,105 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install Theos
-      run: |
-        git clone --recursive https://github.com/theos/theos.git ~/theos
-        echo "THEOS=~/theos" >> $GITHUB_ENV
-
-    - name: Download iOS SDKs
-      run: |
-        git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
-
-    - name: Clone SimpleAutoClicker
+    - name: Clone SimpleAutoClicker source
       run: |
         git clone --recursive https://github.com/DYY-Studio/iOS-SimpleAutoClicker.git clicker
+        ls clicker/
 
-    - name: Patch Constructor (Remove Substrate requirement for Jailed)
+    - name: Patch Tweak.x - Remove Substrate dependency
       run: |
         cd clicker
-        python3 -c "
-        with open('Tweak.x', 'r') as f:
-            code = f.read()
+        python3 << 'PYEOF'
+import re
 
-        idx = code.find('__attribute__((constructor))')
-        if idx != -1:
-            new_ctor = '__attribute__((constructor))\nstatic void tweakConstructor() {\n    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\n        [[AutoClickerManager sharedInstance] setupUI];\n    });\n}\n'
-            code = code[:idx] + new_ctor
+with open('Tweak.x', 'r') as f:
+    code = f.read()
 
-        with open('Tweak.x', 'w') as f:
-            f.write(code)
-        print('Patched Tweak.x successfully!')
-        "
+lines = code.split('\n')
+result = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if '__attribute__((constructor))' in line:
+        new_ctor = '''__attribute__((constructor))
+static void tweakConstructor() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[AutoClickerManager sharedInstance] setupUI];
+    });
+}'''
+        result.append(new_ctor)
+        brace_count = 0
+        while i < len(lines):
+            for ch in lines[i]:
+                if ch == '{': brace_count += 1
+                elif ch == '}': brace_count -= 1
+            i += 1
+            if brace_count == 0 and i > 0:
+                break
+        continue
+    result.append(line)
+    i += 1
 
-    - name: Compile Dylib
+code = '\n'.join(result)
+with open('Tweak.x', 'w') as f:
+    f.write(code)
+print('Patched OK')
+PYEOF
+
+    - name: Check Logos syntax
       run: |
         cd clicker
-        export THEOS=~/theos
-        make FINALPACKAGE=1
+        if grep -q '%hook\|%ctor\|%new\|%orig' Tweak.x; then
+          echo "HAS_LOGOS=true" >> $GITHUB_ENV
+        else
+          echo "HAS_LOGOS=false" >> $GITHUB_ENV
+          cp Tweak.x Tweak.m
+        fi
 
-    - name: Collect Dylib
+    - name: Install Theos for Logos (if needed)
+      if: env.HAS_LOGOS == 'true'
       run: |
-        mkdir -p output
-        find clicker/.theos -name "*.dylib" -exec cp {} output/AutoClicker.dylib \;
-        ls -la output/AutoClicker.dylib
+        export THEOS=$HOME/theos
+        git clone --recursive https://github.com/theos/theos.git $THEOS
+        rm -rf $THEOS/sdks
+        mkdir -p $THEOS/sdks
+        git clone --depth=1 https://github.com/theos/sdks.git /tmp/theos-sdks
+        cp -r /tmp/theos-sdks/*.sdk $THEOS/sdks/ 2>/dev/null || true
+        echo "THEOS=$THEOS" >> $GITHUB_ENV
+        echo "$THEOS/bin" >> $GITHUB_PATH
 
-    - name: Upload AutoClicker Dylib
+    - name: Preprocess Logos to ObjC
+      if: env.HAS_LOGOS == 'true'
+      run: |
+        cd clicker
+        $THEOS/bin/logos.pl Tweak.x > Tweak.m
+
+    - name: Compile Dylib with xcrun clang
+      run: |
+        cd clicker
+        SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+        SOURCES=$(find . -name "*.m" | grep -v ".theos" | grep -v "Test" | tr '\n' ' ')
+        INCLUDES="-I. $(find . -type d | grep -v ".theos" | grep -v ".git" | sed 's/^/-I/' | tr '\n' ' ')"
+        echo "Compiling sources: $SOURCES"
+        xcrun clang \
+          -arch arm64 \
+          -isysroot "$SDK" \
+          -mios-version-min=14.0 \
+          -dynamiclib \
+          -o AutoClicker.dylib \
+          $SOURCES \
+          $INCLUDES \
+          -framework Foundation \
+          -framework UIKit \
+          -framework CoreGraphics \
+          -framework QuartzCore \
+          -framework CoreFoundation \
+          -fobjc-arc \
+          -ObjC
+        ls -la AutoClicker.dylib
+
+    - name: Upload Dylib
       uses: actions/upload-artifact@v4
       with:
-        name: Standalone-AutoClicker
-        path: output/AutoClicker.dylib
+        name: AutoClicker-iOS-Dylib
+        path: clicker/AutoClicker.dylib
