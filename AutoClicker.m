@@ -1,178 +1,164 @@
-// AutoClicker.m
-// Standalone iOS Auto-Clicker - Inject via TrollFools
-// No Substrate / ElleKit / KIF required
-// Unity-compatible: uses IOHIDEvent (hardware-level touch simulation)
-//
-// UI: Floating blue button (draggable)
-//   - Drag button ON TOP of "Trận đánh" button
-//   - Single tap = START auto-click (button turns red)
-//   - Single tap again = STOP
-//   - Long press (1s) = set click target to button's position, then drag button away
+// AutoClicker.m - v2
+// Unity-compatible touch simulation via UITouch injection
+// Inject via TrollFools - no Substrate needed
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
-#import <objc/runtime.h>
 
-// ─── Private IOHIDEvent API ──────────────────────────────────────────────────
+// ─── UITouch Injection (Unity-compatible) ────────────────────────────────────
+// Unity hooks UIApplication.sendEvent: để xử lý touch
+// Cách này hoạt động với Unity vì Unity implement touchesBegan/Moved/Ended trên UIView
 
-typedef struct __IOHIDEvent *IOHIDEventRef;
+static void sendFakeTouch(CGPoint point) {
+    UIApplication *app = [UIApplication sharedApplication];
 
-typedef IOHIDEventRef (*FN_CreateFingerEvent)(
-    CFAllocatorRef allocator,
-    uint64_t       timeStamp,
-    uint32_t       index,
-    uint32_t       identity,
-    uint32_t       eventMask,
-    double x, double y, double z,
-    double tipPressure,
-    double twistAngle,
-    double minorRadius,
-    double majorRadius,
-    double quality,
-    double density,
-    double irregularity,
-    uint32_t buttonMask,
-    uint32_t options
-);
-
-static FN_CreateFingerEvent  gCreateFingerEvent = NULL;
-static BOOL                  gIOHIDLoaded       = NO;
-
-// IOHIDDigitizerEventMask
-#define kHIDRange    (1 << 0)
-#define kHIDTouch    (1 << 1)
-#define kHIDPosition (1 << 2)
-
-static void loadIOHID(void) {
-    if (gIOHIDLoaded) return;
-    gIOHIDLoaded = YES;
-    const char *paths[] = {
-        "/System/Library/Frameworks/IOKit.framework/IOKit",
-        "/usr/lib/libIOKit.dylib",
-        NULL
-    };
-    for (int i = 0; paths[i]; i++) {
-        void *h = dlopen(paths[i], RTLD_LAZY | RTLD_GLOBAL);
-        if (h) {
-            gCreateFingerEvent = (FN_CreateFingerEvent)
-                dlsym(h, "IOHIDEventCreateDigitizerFingerEvent");
-            if (gCreateFingerEvent) {
-                NSLog(@"[AutoClicker] IOHIDEventCreateDigitizerFingerEvent loaded OK");
-                break;
-            }
+    // Tìm game window (bỏ qua PassthroughWindow của chúng ta)
+    UIWindow *gameWindow = nil;
+    for (UIWindow *w in app.windows) {
+        // Lấy window đầu tiên không phải của chúng ta
+        if (!w.isHidden && [NSStringFromClass([w class]) isEqualToString:@"UIWindow"]) {
+            gameWindow = w;
+            break;
         }
     }
-    if (!gCreateFingerEvent)
-        NSLog(@"[AutoClicker] WARNING: IOHIDEventCreateDigitizerFingerEvent not found");
-}
-
-// ─── Send a hardware-level tap ───────────────────────────────────────────────
-
-static void sendHIDTap(CGPoint point) {
-    loadIOHID();
-    if (!gCreateFingerEvent) return;
-
-    // Find game window (non-key-window approach: our overlay is not key,
-    // so game window stays key and receives HID events)
-    UIWindow *gameWindow = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
-        if (w.isKeyWindow) { gameWindow = w; break; }
+    if (!gameWindow) {
+        // Fallback: lấy keyWindow
+        for (UIWindow *w in app.windows) {
+            if (w.isKeyWindow) { gameWindow = w; break; }
+        }
     }
-    if (!gameWindow) return;
-
-    CGRect bounds = gameWindow.bounds;
-    if (bounds.size.width <= 0 || bounds.size.height <= 0) return;
-
-    double normX = point.x / bounds.size.width;
-    double normY = point.y / bounds.size.height;
-    uint64_t ts  = mach_absolute_time();
-
-    // Touch DOWN
-    IOHIDEventRef down = gCreateFingerEvent(
-        kCFAllocatorDefault, ts,
-        0, 1,                               // finger index=0, identity=1
-        kHIDRange | kHIDTouch | kHIDPosition,
-        normX, normY, 0.0,                  // x, y, z
-        1.0, 0.0,                           // tipPressure, twistAngle
-        3.0, 3.0,                           // minorRadius, majorRadius
-        1.0, 1.0, 0.1,                      // quality, density, irregularity
-        0, 0                                // buttonMask, options
-    );
-
-    UIApplication *app = [UIApplication sharedApplication];
-    SEL enqueue = NSSelectorFromString(@"_enqueueHIDEvent:");
-
-    if (down && [app respondsToSelector:enqueue]) {
-        NSMethodSignature *sig = [app methodSignatureForSelector:enqueue];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:app];
-        [inv setSelector:enqueue];
-        [inv setArgument:&down atIndex:2];
-        [inv invoke];
+    if (!gameWindow) {
+        NSLog(@"[AutoClicker] No game window found!");
+        return;
     }
-    if (down) CFRelease(down);
 
-    // Touch UP after 80 ms
+    // Tìm view tại vị trí click
+    UIView *hitView = [gameWindow hitTest:point withEvent:nil];
+    if (!hitView) hitView = gameWindow;
+
+    // Tạo UITouch
+    UITouch *touch = [UITouch new];
+    [touch setValue:@(UITouchPhaseBegan)   forKey:@"phase"];
+    [touch setValue:@(1)                   forKey:@"tapCount"];
+    [touch setValue:@(CACurrentMediaTime()) forKey:@"timestamp"];
+    [touch setValue:hitView                forKey:@"view"];
+    [touch setValue:gameWindow             forKey:@"window"];
+    [touch setValue:[NSValue valueWithCGPoint:point] forKey:@"locationInWindow"];
+    [touch setValue:[NSValue valueWithCGPoint:point] forKey:@"previousLocationInWindow"];
+    [touch setValue:@(UITouchTypeDirect)   forKey:@"type"];
+
+    // Lấy UITouchesEvent từ app (private API)
+    SEL eventSel = NSSelectorFromString(@"_touchesEvent");
+    if (![app respondsToSelector:eventSel]) {
+        NSLog(@"[AutoClicker] _touchesEvent not found — trying fallback");
+        // Fallback: gửi trực tiếp qua responder chain
+        [hitView touchesBegan:[NSSet setWithObject:touch] withEvent:nil];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
+            [hitView touchesEnded:[NSSet setWithObject:touch] withEvent:nil];
+        });
+        return;
+    }
+
+    NSMethodSignature *sig = [app methodSignatureForSelector:eventSel];
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    [inv setTarget:app];
+    [inv setSelector:eventSel];
+    [inv invoke];
+
+    UIEvent *event = nil;
+    [inv getReturnValue:&event];
+
+    if (!event) {
+        NSLog(@"[AutoClicker] Could not get UITouchesEvent");
+        return;
+    }
+
+    // Thêm touch vào event
+    SEL addSel = NSSelectorFromString(@"_addTouch:forDelayedDelivery:");
+    if ([event respondsToSelector:addSel]) {
+        NSMethodSignature *addSig = [event methodSignatureForSelector:addSel];
+        NSInvocation *addInv = [NSInvocation invocationWithMethodSignature:addSig];
+        [addInv setTarget:event];
+        [addInv setSelector:addSel];
+        [addInv setArgument:&touch atIndex:2];
+        BOOL delayed = NO;
+        [addInv setArgument:&delayed atIndex:3];
+        [addInv invoke];
+    } else {
+        NSLog(@"[AutoClicker] _addTouch:forDelayedDelivery: not found");
+    }
+
+    // Gửi touch began
+    [app sendEvent:event];
+    NSLog(@"[AutoClicker] Sent touchBegan at (%.0f, %.0f)", point.x, point.y);
+
+    // Gửi touch ended sau 80ms
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
-        uint64_t ts2 = mach_absolute_time();
-        IOHIDEventRef up = gCreateFingerEvent(
-            kCFAllocatorDefault, ts2,
-            0, 1,
-            kHIDRange | kHIDPosition,       // no kHIDTouch → finger lifted
-            normX, normY, 0.0,
-            0.0, 0.0,
-            3.0, 3.0,
-            1.0, 1.0, 0.1,
-            0, 0
-        );
-        if (up && [app respondsToSelector:enqueue]) {
-            NSMethodSignature *sig = [app methodSignatureForSelector:enqueue];
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:app];
-            [inv setSelector:enqueue];
-            [inv setArgument:&up atIndex:2];
-            [inv invoke];
+        [touch setValue:@(UITouchPhaseEnded)    forKey:@"phase"];
+        [touch setValue:@(CACurrentMediaTime())  forKey:@"timestamp"];
+        [app sendEvent:event];
+
+        // Dọn dẹp touches
+        SEL cleanSel = NSSelectorFromString(@"_removeAllTouches");
+        if ([event respondsToSelector:cleanSel]) {
+            [event performSelector:cleanSel];
         }
-        if (up) CFRelease(up);
+        NSLog(@"[AutoClicker] Sent touchEnded");
     });
 }
 
-// ─── Passthrough Window & View ───────────────────────────────────────────────
-// Cho phép touch xuyên qua vùng trống, chỉ giữ lại touch trên button/dot
+// ─── Visual Flash (xác nhận vị trí click) ───────────────────────────────────
+static void flashAt(CGPoint point, UIView *parentView) {
+    UIView *flash = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 30, 30)];
+    flash.center = point;
+    flash.backgroundColor = [UIColor colorWithRed:1 green:1 blue:0 alpha:0.8];
+    flash.layer.cornerRadius = 15;
+    flash.userInteractionEnabled = NO;
+    [parentView addSubview:flash];
+
+    [UIView animateWithDuration:0.4 animations:^{
+        flash.alpha = 0;
+        flash.transform = CGAffineTransformMakeScale(2, 2);
+    } completion:^(BOOL done) {
+        [flash removeFromSuperview];
+    }];
+}
+
+// ─── Passthrough UI ──────────────────────────────────────────────────────────
 
 @interface PassthroughView : UIView
 @end
 @implementation PassthroughView
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    // Nếu hit vào chính view nền → trả nil để touch xuyên xuống game
-    return (hit == self) ? nil : hit;
+- (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
+    UIView *v = [super hitTest:p withEvent:e];
+    return (v == self) ? nil : v;
 }
 @end
 
 @interface PassthroughWindow : UIWindow
 @end
 @implementation PassthroughWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    // Nếu không có subview nào bắt touch → cho game xử lý
-    return (hit == self) ? nil : hit;
+- (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
+    UIView *v = [super hitTest:p withEvent:e];
+    return (v == self) ? nil : v;
 }
 @end
 
-// ─── Floating UI Controller ──────────────────────────────────────────────────
+// ─── Controller ─────────────────────────────────────────────────────────────
 
 @interface ACController : NSObject
 @property (nonatomic) BOOL      isRunning;
-@property (nonatomic) CGPoint   clickTarget;   // where to click
-@property (nonatomic) BOOL      settingTarget; // long-press mode
-@property (nonatomic, strong) NSTimer      *timer;
-@property (nonatomic, strong) UIWindow     *overlayWindow;
-@property (nonatomic, strong) UIButton     *controlBtn;
-@property (nonatomic, strong) UIView       *targetDot;  // red dot showing click spot
+@property (nonatomic) CGPoint   clickTarget;
+@property (nonatomic, strong) NSTimer   *timer;
+@property (nonatomic, strong) UIWindow  *overlayWindow;
+@property (nonatomic, strong) UIButton  *btn;
+@property (nonatomic, strong) UIView    *dot;      // chấm đỏ = vị trí sẽ click
+@property (nonatomic, strong) UILabel  *label;    // hiển thị tọa độ
 + (instancetype)shared;
 - (void)setup;
 @end
@@ -180,170 +166,166 @@ static void sendHIDTap(CGPoint point) {
 @implementation ACController
 
 + (instancetype)shared {
-    static ACController *inst;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{ inst = [ACController new]; });
-    return inst;
+    static ACController *i; static dispatch_once_t t;
+    dispatch_once(&t, ^{ i = [ACController new]; });
+    return i;
 }
 
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // Default click position: center-bottom area (common for battle buttons)
-        CGSize screen = [UIScreen mainScreen].bounds.size;
-        _clickTarget  = CGPointMake(screen.width * 0.5, screen.height * 0.78);
+        CGSize s = UIScreen.mainScreen.bounds.size;
+        // Mặc định: giữa màn hình, 80% từ trên xuống
+        _clickTarget = CGPointMake(s.width * 0.5, s.height * 0.80);
     }
     return self;
 }
 
 - (void)setup {
-    // ── Create overlay window ──
+    // Tạo overlay window
     PassthroughWindow *win;
-    UIWindowScene *activeScene = nil;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+    UIWindowScene *scene = nil;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]] &&
-            s.activationState == UISceneActivationStateForegroundActive) {
-            activeScene = (UIWindowScene *)s;
-            break;
-        }
-    }
-    if (activeScene)
-        win = [[PassthroughWindow alloc] initWithWindowScene:activeScene];
-    else
-        win = [[PassthroughWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+            s.activationState == UISceneActivationStateForegroundActive)
+        { scene = (UIWindowScene *)s; break; }
 
-    win.windowLevel            = UIWindowLevelAlert + 500;
-    win.backgroundColor        = UIColor.clearColor;
-    win.userInteractionEnabled = YES;
-    // KHÔNG makeKeyAndVisible → game window giữ key → nhận HID events
-    win.hidden = NO;
+    win = scene
+        ? [[PassthroughWindow alloc] initWithWindowScene:scene]
+        : [[PassthroughWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+
+    win.windowLevel = UIWindowLevelAlert + 1000;
+    win.backgroundColor = UIColor.clearColor;
+    win.hidden = NO;  // KHÔNG makeKeyAndVisible
     self.overlayWindow = win;
 
     UIViewController *vc = [UIViewController new];
-    // Dùng PassthroughView để touch vùng trống xuyên qua game
-    PassthroughView *rootView = [[PassthroughView alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    rootView.backgroundColor = UIColor.clearColor;
-    vc.view = rootView;
+    PassthroughView *root = [[PassthroughView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    root.backgroundColor = UIColor.clearColor;
+    vc.view = root;
     win.rootViewController = vc;
 
-    // ── Control button ──
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = CGRectMake(20, 120, 56, 56);
-    [self styleButton:btn running:NO];
-    [btn setTitle:@"▶" forState:UIControlStateNormal];
-    [btn addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+    // ── Nút điều khiển ──
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+    b.frame = CGRectMake(10, 130, 54, 54);
+    b.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:1 alpha:0.9];
+    b.layer.cornerRadius = 27;
+    b.layer.borderWidth = 2; b.layer.borderColor = UIColor.whiteColor.CGColor;
+    b.layer.shadowOpacity = 0.4; b.layer.shadowRadius = 4;
+    b.layer.shadowOffset = CGSizeMake(0,2); b.layer.shadowColor = UIColor.blackColor.CGColor;
+    b.titleLabel.font = [UIFont systemFontOfSize:18];
+    [b setTitle:@"▶" forState:UIControlStateNormal];
+    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [b addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
 
-    UILongPressGestureRecognizer *lp =
-        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(onLongPress:)];
-    lp.minimumPressDuration = 0.8;
-    [btn addGestureRecognizer:lp];
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(onLongPress:)];
+    lp.minimumPressDuration = 0.7;
+    [b addGestureRecognizer:lp];
 
-    UIPanGestureRecognizer *pan =
-        [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
-    [btn addGestureRecognizer:pan];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(onPan:)];
+    [b addGestureRecognizer:pan];
 
-    self.controlBtn = btn;
-    [vc.view addSubview:btn];
+    self.btn = b;
+    [root addSubview:b];
 
-    // ── Target dot (shows where the click will land) ──
-    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 18, 18)];
-    dot.center          = self.clickTarget;
-    dot.backgroundColor = [UIColor colorWithRed:1 green:0.2 blue:0.2 alpha:0.75];
-    dot.layer.cornerRadius = 9;
-    dot.layer.borderColor  = UIColor.whiteColor.CGColor;
-    dot.layer.borderWidth  = 1.5;
+    // ── Chấm đỏ (vị trí click) ──
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0,0,16,16)];
+    dot.center = self.clickTarget;
+    dot.backgroundColor = [UIColor colorWithRed:1 green:0.15 blue:0.15 alpha:0.85];
+    dot.layer.cornerRadius = 8;
+    dot.layer.borderColor = UIColor.whiteColor.CGColor;
+    dot.layer.borderWidth = 1.5;
     dot.userInteractionEnabled = NO;
-    self.targetDot = dot;
-    [vc.view addSubview:dot];
+    self.dot = dot;
+    [root addSubview:dot];
 
-    NSLog(@"[AutoClicker] UI ready. Target: (%.0f, %.0f)", self.clickTarget.x, self.clickTarget.y);
-}
+    // ── Label tọa độ ──
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(0,0,120,20)];
+    lbl.center = CGPointMake(b.center.x + 70, b.center.y);
+    lbl.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
+    lbl.textColor = UIColor.whiteColor;
+    lbl.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+    lbl.layer.cornerRadius = 4; lbl.clipsToBounds = YES;
+    lbl.textAlignment = NSTextAlignmentCenter;
+    lbl.text = [NSString stringWithFormat:@"(%.0f,%.0f)", self.clickTarget.x, self.clickTarget.y];
+    lbl.userInteractionEnabled = NO;
+    self.label = lbl;
+    [root addSubview:lbl];
 
-- (void)styleButton:(UIButton *)btn running:(BOOL)running {
-    btn.layer.cornerRadius  = 28;
-    btn.layer.borderWidth   = 2;
-    btn.layer.borderColor   = UIColor.whiteColor.CGColor;
-    btn.layer.shadowColor   = UIColor.blackColor.CGColor;
-    btn.layer.shadowOffset  = CGSizeMake(0, 2);
-    btn.layer.shadowOpacity = 0.45;
-    btn.layer.shadowRadius  = 5;
-    btn.titleLabel.font     = [UIFont systemFontOfSize:20];
-    [btn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    if (running)
-        btn.backgroundColor = [UIColor colorWithRed:0.9 green:0.25 blue:0.25 alpha:0.92];
-    else
-        btn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:1.0 alpha:0.92];
+    NSLog(@"[AutoClicker v2] UI ready. Default target: (%.0f,%.0f)",
+          self.clickTarget.x, self.clickTarget.y);
 }
 
 - (void)onTap {
-    if (self.settingTarget) {
-        // Cancel target-setting mode
-        self.settingTarget = NO;
-        [self.controlBtn setTitle:@"▶" forState:UIControlStateNormal];
-        [self styleButton:self.controlBtn running:NO];
-        return;
-    }
     self.isRunning = !self.isRunning;
     if (self.isRunning) {
-        [self.controlBtn setTitle:@"⏹" forState:UIControlStateNormal];
-        [self styleButton:self.controlBtn running:YES];
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:1.2
+        self.btn.backgroundColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.2 alpha:0.9];
+        [self.btn setTitle:@"⏹" forState:UIControlStateNormal];
+        self.timer = [NSTimer scheduledTimerWithTimeInterval:1.5
                                                       target:self
                                                     selector:@selector(doClick)
                                                     userInfo:nil
                                                      repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
-        NSLog(@"[AutoClicker] ▶ Started — clicking at (%.0f, %.0f)", self.clickTarget.x, self.clickTarget.y);
+        // Click ngay lần đầu
+        [self doClick];
+        NSLog(@"[AutoClicker] ▶ STARTED at (%.0f,%.0f)", self.clickTarget.x, self.clickTarget.y);
     } else {
-        [self.controlBtn setTitle:@"▶" forState:UIControlStateNormal];
-        [self styleButton:self.controlBtn running:NO];
-        [self.timer invalidate];
-        self.timer = nil;
-        NSLog(@"[AutoClicker] ⏹ Stopped");
+        self.btn.backgroundColor = [UIColor colorWithRed:0.1 green:0.5 blue:1 alpha:0.9];
+        [self.btn setTitle:@"▶" forState:UIControlStateNormal];
+        [self.timer invalidate]; self.timer = nil;
+        NSLog(@"[AutoClicker] ⏹ STOPPED");
     }
 }
 
 - (void)onLongPress:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
-    // Set click target = current button center
-    CGPoint btnCenter = self.controlBtn.center;
-    self.clickTarget  = btnCenter;
-    self.targetDot.center = btnCenter;
+    // Đặt target = vị trí nút hiện tại
+    CGPoint c = self.btn.center;
+    self.clickTarget = c;
+    self.dot.center  = c;
+    self.label.text  = [NSString stringWithFormat:@"(%.0f,%.0f)", c.x, c.y];
 
-    // Flash feedback
-    [UIView animateWithDuration:0.15 animations:^{
-        self.controlBtn.transform = CGAffineTransformMakeScale(1.3, 1.3);
+    // Hiệu ứng xác nhận
+    [UIView animateWithDuration:0.1 animations:^{
+        self.btn.transform = CGAffineTransformMakeScale(1.4, 1.4);
     } completion:^(BOOL f) {
-        [UIView animateWithDuration:0.15 animations:^{
-            self.controlBtn.transform = CGAffineTransformIdentity;
+        [UIView animateWithDuration:0.1 animations:^{
+            self.btn.transform = CGAffineTransformIdentity;
         }];
     }];
-
-    NSLog(@"[AutoClicker] 🎯 Target set to (%.0f, %.0f)", btnCenter.x, btnCenter.y);
+    NSLog(@"[AutoClicker] 🎯 Target saved: (%.0f,%.0f)", c.x, c.y);
 }
 
 - (void)onPan:(UIPanGestureRecognizer *)g {
-    CGPoint delta = [g translationInView:g.view.superview];
-    CGPoint c     = g.view.center;
-    c.x += delta.x;
-    c.y += delta.y;
+    CGPoint d = [g translationInView:g.view.superview];
+    CGPoint c = g.view.center;
+    c.x += d.x; c.y += d.y;
     g.view.center = c;
     [g setTranslation:CGPointZero inView:g.view.superview];
+    // Cập nhật label vị trí nút
+    self.label.center = CGPointMake(c.x + 70, c.y);
 }
 
 - (void)doClick {
-    sendHIDTap(self.clickTarget);
+    // Flash vàng để xác nhận vị trí click
+    flashAt(self.clickTarget, self.overlayWindow.rootViewController.view);
+    // Gửi fake touch
+    sendFakeTouch(self.clickTarget);
 }
 
 @end
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// ─── Entry Point ─────────────────────────────────────────────────────────────
 
 __attribute__((constructor))
 static void acInit(void) {
-    NSLog(@"[AutoClicker] Dylib loaded!");
+    NSLog(@"[AutoClicker v2] Loaded!");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [[ACController shared] setup];
+        NSLog(@"[AutoClicker v2] UI initialized!");
     });
 }
